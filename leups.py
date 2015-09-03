@@ -26,7 +26,7 @@
 
 
 scriptname="leups"
-version="0.2"
+version="0.3"
 codename="Alaska"
 
 import sys
@@ -258,7 +258,7 @@ def writeFilesystemQ(macs,trapsource,workingdir):
 # if no --dry-run is specified, set the port config
 # hardcoded for cisco ios
 #
-def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scopes):
+def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scopes,interface_excludes):
 
 
 	# amac2vlan is a dict which is mapping a mac-address to a vlanid
@@ -325,6 +325,7 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 		# than snmp
 		#
 		s.prompt()
+		logger.info("executing \"show mac addres-table\"")
 		s.sendline('show mac address-table\n')
 
 		# wait for the closing line by the string "Total Mac Addresses"
@@ -336,8 +337,12 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 
 		# iterate the output, filtering mac-table by DYNAMIC entries
 		#
+		exclude_cnt = 0	
 		for line in showmactablestr.split("\n"):
 			if line.count("DYNAMIC"):
+				
+				exclude=False
+
 				# replace multiple spaces with one ;
 				_line = re.sub(" +",";",line)
 				_mac = _line.split(";")[1].replace(".","").upper()
@@ -345,7 +350,17 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 
 				if is_valid_macaddress(_mac):
 
-					mactable[_mac] = _port
+					if len(interface_excludes) > 0:
+						for excstr in interface_excludes:
+							if re.search(excstr,line):
+								exclude=True
+								exclude_cnt += 1
+								logger.debug("line excluded by exclude string:"+excstr+" line: "+line)
+						
+					if exclude == False:
+						mactable[_mac] = _port
+
+		logger.info("number of excluded lines from the show mac address-table command: "+str(exclude_cnt))
 
 		# now we should have a filled mactable dict with mac -> switchport
 		# the port is a usable interface name for applying settings later on
@@ -382,7 +397,7 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 			try:
 				_interface = mactable[mac]
 			except:
-				logger.error("error while interface finding interface from show mac address-table for mac "+mac)
+				logger.error("error while trying to find interface from \"show mac address-table\" for mac "+mac)
 				return 
 
 			if mac2hostname.keys().count(mac) > 0:
@@ -455,6 +470,31 @@ def loadProfiles(profiledir):
 
 	return profiles
 
+def loadExcludes(excludesfile):
+
+	excludes=[]
+
+	excludelines=""
+
+        try:
+                f = open(excludesfile, 'r')
+                # ignore first line - header
+                f.readline()
+                excludelines = f.readlines()
+                f.close()
+        except:
+                logger.error("error while reading interface.exclude file.")
+                sys.exit(1)
+
+        for line in excludelines:
+		if not line.strip().startswith("#"):
+			excludes.append(line.strip())
+		
+	logger.info("number of interface exclude expressions loaded: "+str(len(excludes)))
+
+	return excludes
+
+
 def loadScopes(scopecsvfile):
 
 	scopes={}
@@ -478,11 +518,12 @@ def loadScopes(scopecsvfile):
 
 	for line in scopecsvlines:
 		scope={}
-		if line.split(";") >= 4:
-			scope["ipv4subnet"]  = line.split(";")[0] 
-			scope["sshusername"]  = line.split(";")[1] 
-			scope["sshpassword"]  = line.split(";")[2] 
-			scope["voicevlanid"]  = line.split(";")[3] 
+		if line.split(";") >= 5:
+			scope["locationid"]  = line.split(";")[0] 
+			scope["ipv4subnet"]  = line.split(";")[1] 
+			scope["sshusername"]  = line.split(";")[2] 
+			scope["sshpassword"]  = line.split(";")[3] 
+			scope["voicevlanid"]  = line.split(";")[4] 
 
 			scopes[scope["ipv4subnet"]] = scope
 
@@ -495,7 +536,7 @@ def loadScopes(scopecsvfile):
 # created by snmp traps with snmptt
 # and leups in --store mode
 #
-def worker(workingdir,dryrun,profiles,scopes):
+def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawareness,ignorelocationid):
 
 
 	# init empty dict for mac -> vlan from csv
@@ -506,6 +547,9 @@ def worker(workingdir,dryrun,profiles,scopes):
 
 	# init empty dict for mac -> profile from csv
 	mac2profile = {}
+
+        # init empty dict for mac -> locationid from csv
+        mac2locationid = {}
 
 	
 
@@ -533,6 +577,10 @@ def worker(workingdir,dryrun,profiles,scopes):
 						mac2vlan[str(row[0]).upper()] = int(row[4])
 					except:
 						mac2vlan[str(row[0]).upper()] = 0
+                                        try:
+                                                mac2locationid[str(row[0]).upper()] = int(row[1])
+                                        except:
+                                                mac2locationid[str(row[0]).upper()] = 1
 		except:
 			logger.warn("error on parsing mac2vlan.csv file"+" "+str(sys.exc_info()[0])+" "+str(sys.exc_info()[1]))
 			error=True
@@ -605,17 +653,75 @@ def worker(workingdir,dryrun,profiles,scopes):
 
 					if not error:
 
+						if locationawareness:
+							logger.info("location awarness is active")
+
 						for mac in qmac2vlan.keys():
+
+							if locationawareness:
+								specific_location_found = False
 	
 
 							try:
 								if not qmac2vlan[mac] == mac2vlan[mac]:
 
-									if mac2vlan[mac] == 0:
-										logger.info("action needed, for mac "+mac+" ("+mac2hostname[mac]+") switch "+switchipdir+" but we have no valid vlan in the csv, switch reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac]))
+									# if location awareness is enabled, try to match the locationid from the scopes file
+									# column number 1 to the locationid of the mac2vlan.csv file, if the mac is found and the location
+									# ids are matching, the mac will be added to the action-mac-dict, if no match is found the default
+									# "global" location id "1" will be used to match a location
+									if locationawareness:
+
+
+
+										if mac2vlan[mac] == 0:
+											logger.debug("action maybe needed, for mac "+mac+" ("+mac2hostname[mac]+") switch "+switchipdir+" but we have no valid vlan in the csv, switch reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac]))
+										else:
+
+											# find the scope of the switch in the scopes dict
+											scope={}
+											scopefound=False
+
+											# find the scope read from the scopes.csv for the current switchip
+											for switchsubnet in scopes.keys():
+												if is_in_v4subnet(switchipdir,switchsubnet):
+													scope = scopes[switchsubnet]
+													scopefound=True
+													break
+
+											# check if the locationid of the switch, found via scopes
+											# matches the locationid of the mac in the mac2vlan file
+											if scope["locationid"] == mac2locationid[mac]:
+												if not int(ignorelocationid) == mac2locationid[mac]:
+													amac2vlan[mac]=mac2vlan[mac]
+													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for locationid: "+str(scopes["locationid"]))
+													specific_location_found = True
+												else:
+													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for locationid: "+str(scopes["locationid"])+" but locationid is set to ignore")
+			
+
+							
+											# if no specific location was found via the scope to mac location id match above
+											# check if the mac has location id "1", the global location id
+											if specific_location_found == False and mac2locationid[mac] == 1:
+                                                                                                if not int(ignorelocationid) == mac2locationid[mac]:
+													amac2vlan[mac]=mac2vlan[mac]
+													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for global locationid: 1")
+												else:
+													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for global locationid: 1, but locationid is set to ignore")
+	
+
+
+
+											
+
 									else:
-										amac2vlan[mac]=mac2vlan[mac]
-										logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac]))
+
+
+										if mac2vlan[mac] == 0:
+											logger.debug("action maybe needed, for mac "+mac+" ("+mac2hostname[mac]+") switch "+switchipdir+" but we have no valid vlan in the csv, switch reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac]))
+										else:
+											amac2vlan[mac]=mac2vlan[mac]
+											logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac]))
 
 								else:
 									logger.debug("no action needed, switch reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac]))
@@ -627,7 +733,7 @@ def worker(workingdir,dryrun,profiles,scopes):
 				 
 					if not error:
 						if len(amac2vlan.keys()) > 0:
-							executeAction(amac2vlan,mac2profile,mac2hostname,switchipdir,dryrun,profiles,scopes)
+							executeAction(amac2vlan,mac2profile,mac2hostname,switchipdir,dryrun,profiles,scopes,interface_excludes)
 						else:
 							logger.info("no action needed on switch: "+switchipdir)
 
@@ -646,6 +752,8 @@ def main():
         parser.add_option("-m", "--macchangedmsg", dest="machangedmsg", help="")
         parser.add_option("-s", "--store", action="store_true", dest="store", default=False, help="store mode, mode for use with snmptt")
         parser.add_option("-w", "--worker", action="store_true", dest="worker", default=False, help="worker mode, reads the q and execute actions")
+        parser.add_option("-l", "--locationawareness", action="store_true", dest="locationawareness", default=False, help="enable location awareness")
+        parser.add_option("-i", "--ignorelocation", dest="ignorelocationid", help="ignore the following locationid")
         parser.add_option("-r", "--dryrun", action="store_true", dest="dryrun", default=False, help="worker mode, dry run, don't configure anything")
         parser.add_option("-u", "--updater", action="store_true", dest="updater", default=False, help="updater mode, get new cmdb cache database")
 	parser.add_option("-d", "--daemon", action="store_true", dest="daemon", default=False, help="start !!worker!! mode as daemon")
@@ -830,6 +938,10 @@ def main():
 		else:
 			scopefile=configdir+os.sep+"scopes.csv"
 
+                if not os.path.isfile(configdir+os.sep+"interface.exclude"):
+                        logger.error("interface.exclude doesn't exist ("+configdir+os.sep+"interface.exclude"")")
+                        sys.exit(1)
+
 
 		profiles={}
 
@@ -839,19 +951,24 @@ def main():
 
 		scopes = loadScopes(configdir+os.sep+"scopes.csv")
 		
+		interface_excludes=[]
+
+		interface_excludes= loadExcludes(configdir+os.sep+"interface.exclude")
 
 
 		if options.daemon:
 
 			logger.info("started in worker daemon mode")
 			with daemon.DaemonContext():
-				worker(workingdir,options.dryrun,profiles,scopes)
+				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid)
 				time.sleep(25)
 
 		else:
 
 			logger.info("started in worker fg mode")
-			worker(workingdir,options.dryrun,profiles,scopes)
+			while True:
+				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid)
+				time.sleep(25)
 
 			
 
