@@ -26,7 +26,7 @@
 
 
 scriptname="leups"
-version="0.3"
+version="0.4"
 codename="Alaska"
 
 import sys
@@ -344,7 +344,7 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 				exclude=False
 
 				# replace multiple spaces with one ;
-				_line = re.sub(" +",";",line)
+				_line = re.sub(" +",";",line.strip())
 				_mac = _line.split(";")[1].replace(".","").upper()
 				_port = _line.split(";")[3].strip()
 
@@ -398,6 +398,7 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 				_interface = mactable[mac]
 			except:
 				logger.error("error while trying to find interface from \"show mac address-table\" for mac "+mac)
+				print mactable
 				return 
 
 			if mac2hostname.keys().count(mac) > 0:
@@ -642,9 +643,9 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 										
 										pass
 
-									if not dryrun:
-										logger.info("removing file from q "+workingdir+os.sep+switchipdir+os.sep+macfile)
-										os.remove(workingdir+os.sep+switchipdir+os.sep+macfile)
+								#if not dryrun:
+								logger.info("removing file from q "+workingdir+os.sep+switchipdir+os.sep+macfile)
+								os.remove(workingdir+os.sep+switchipdir+os.sep+macfile)
 
 									
 			
@@ -660,6 +661,7 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 
 							if locationawareness:
 								specific_location_found = False
+								location_found = False
 	
 
 							try:
@@ -690,7 +692,7 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 
 											# check if the locationid of the switch, found via scopes
 											# matches the locationid of the mac in the mac2vlan file
-											if scope["locationid"] == mac2locationid[mac]:
+											if int(scope["locationid"]) == int(mac2locationid[mac]):
 												if not int(ignorelocationid) == mac2locationid[mac]:
 													amac2vlan[mac]=mac2vlan[mac]
 													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for locationid: "+str(scopes["locationid"]))
@@ -705,6 +707,7 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 											if specific_location_found == False and mac2locationid[mac] == 1:
                                                                                                 if not int(ignorelocationid) == mac2locationid[mac]:
 													amac2vlan[mac]=mac2vlan[mac]
+													location_found = True
 													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for global locationid: 1")
 												else:
 													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for global locationid: 1, but locationid is set to ignore")
@@ -712,6 +715,8 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 
 
 
+											if location_found == False:
+													logger.info("action maybe needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+", but no matching locationid found, locationid of csv: "+str(mac2locationid[mac])+" locationid of switch: "+str(scope["locationid"]))
 											
 
 									else:
@@ -757,6 +762,7 @@ def main():
         parser.add_option("-r", "--dryrun", action="store_true", dest="dryrun", default=False, help="worker mode, dry run, don't configure anything")
         parser.add_option("-u", "--updater", action="store_true", dest="updater", default=False, help="updater mode, get new cmdb cache database")
 	parser.add_option("-d", "--daemon", action="store_true", dest="daemon", default=False, help="start !!worker!! mode as daemon")
+	parser.add_option("", "--debug", action="store_true", dest="debug", default=False, help="enable debug logging")
         parser.add_option("", "--csv-url", dest="csvurl", help="url where mac -> vlan, mac -> switchport profile csv file could be fetched, use with --updater")
         parser.add_option("-v", "--version", action="store_true", dest="showversion", default=False, help="display version information")
         parser.add_option("", "--show-csv-format", action="store_true", dest="showcsv", default=False, help="display the csv format definition")
@@ -771,6 +777,9 @@ def main():
 	configdir = "/etc/leups"
 	profiledir = configdir+os.sep+"profiles"
 	scopefile = "/dev/null"
+
+	if options.debug:
+		logger.setLevel(logging.DEBUG)
 
 	if options.showprofilereplacementvars:
 		print "Profile Replacment Variables:"
