@@ -26,7 +26,7 @@
 
 
 scriptname="leups"
-version="0.4"
+version="0.5"
 codename="Alaska"
 
 import sys
@@ -255,7 +255,7 @@ def writeFilesystemQ(macs,trapsource,workingdir):
 # execute the action
 # using ssh because snmp is terrible slow on cisco catalysts
 # login with pexpect and do a "show mac address-table"
-# if no --dry-run is specified, set the port config
+# if no --dryrun is specified, set the port config
 # hardcoded for cisco ios
 #
 def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scopes,interface_excludes):
@@ -495,6 +495,44 @@ def loadExcludes(excludesfile):
 
 	return excludes
 
+def loadAutodryScopes(scopecsvfile):
+
+        scopes={}
+
+        # col0 = switch-mgmt-subnet
+        # col1 = dryrun or not
+
+	# dryrun will always be used unless
+	# col1 is NO-DRYRUN
+
+        scopecsvlines=""
+
+        try:
+                f = open(scopecsvfile, 'r')
+                # ignore first line - header
+                f.readline()
+                scopecsvlines = f.readlines()
+                f.close()
+        except:
+                logger.error("error while reading "+scopecsvfile+" file.")
+                sys.exit(1)
+
+        for line in scopecsvlines:
+                scope={}
+                if line.split(";") >= 2:
+                        scope["locationid"]  = line.split(";")[0]
+			scope["ipv4subnet"]  = line.split(";")[1] 
+			_dryrunornot = line.split(";")[2]
+			if _dryrunornot == "NO-DRYRUN":
+	                        scope["dryrun"]  = False
+			else:
+				scope["dryrun"]  = True
+
+                        scopes[scope["ipv4subnet"]] = scope
+
+        logger.info("number of autodry scopes loaded: "+str(len(scopes.keys())))
+
+        return scopes
 
 def loadScopes(scopecsvfile):
 
@@ -537,7 +575,7 @@ def loadScopes(scopecsvfile):
 # created by snmp traps with snmptt
 # and leups in --store mode
 #
-def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawareness,ignorelocationid):
+def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawareness,ignorelocationid,autodryrun, autodryscopes):
 
 
 	# init empty dict for mac -> vlan from csv
@@ -690,6 +728,30 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 													scopefound=True
 													break
 
+
+                                                                                        # find the scope of the switch in the autodry scopes dict
+                                                                                        autodryscope={}
+                                                                                        autodryscopefound=False
+
+                                                                                        # find the scope read from the scopes.csv for the current switchip
+                                                                                        for switchsubnet in autodryscopes.keys():
+                                                                                                if is_in_v4subnet(switchipdir,switchsubnet):
+                                                                                                        autodryscope = autodryscopes[switchsubnet]
+                                                                                                        autodryscopefound=True
+                                                                                                        break
+
+											if autodryrun:
+												logger.info("autodryrun active")
+												dryrun = False
+												if autodryscopefound:
+													if autodryscope["dryrun"] == True:
+														dryrun = True
+														logger.info("autodry run has set switch "+switchipdir+" to DRYRUN.")
+													else:
+														dryrun = False
+														logger.info("autodry run has set switch "+switchipdir+" to ENFORCING.")
+
+
 											# check if the locationid of the switch, found via scopes
 											# matches the locationid of the mac in the mac2vlan file
 											if int(scope["locationid"]) == int(mac2locationid[mac]):
@@ -737,6 +799,11 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 									pass
 				 
 					if not error:
+
+
+
+
+
 						if len(amac2vlan.keys()) > 0:
 							executeAction(amac2vlan,mac2profile,mac2hostname,switchipdir,dryrun,profiles,scopes,interface_excludes)
 						else:
@@ -760,6 +827,7 @@ def main():
         parser.add_option("-l", "--locationawareness", action="store_true", dest="locationawareness", default=False, help="enable location awareness")
         parser.add_option("-i", "--ignorelocation", dest="ignorelocationid", help="ignore the following locationid")
         parser.add_option("-r", "--dryrun", action="store_true", dest="dryrun", default=False, help="worker mode, dry run, don't configure anything")
+        parser.add_option("-a", "--autodry", action="store_true", dest="autodryrun", default=False, help="worker mode, auto switch dryrun on or off by dryrun.csv only allowed with --dryrun and --locationawareness")
         parser.add_option("-u", "--updater", action="store_true", dest="updater", default=False, help="updater mode, get new cmdb cache database")
 	parser.add_option("-d", "--daemon", action="store_true", dest="daemon", default=False, help="start !!worker!! mode as daemon")
 	parser.add_option("", "--debug", action="store_true", dest="debug", default=False, help="enable debug logging")
@@ -778,8 +846,14 @@ def main():
 	profiledir = configdir+os.sep+"profiles"
 	scopefile = "/dev/null"
 
+
 	if options.debug:
 		logger.setLevel(logging.DEBUG)
+
+	if options.autodryrun:
+		if not options.dryrun or not options.autodryrun or not options.locationawareness:
+			logger.error("--autodry is only valid with --dryrun and --locationawareness")
+			sys.exit(1)
 
 	if options.showprofilereplacementvars:
 		print "Profile Replacment Variables:"
@@ -959,6 +1033,11 @@ def main():
 		scopes={}
 
 		scopes = loadScopes(configdir+os.sep+"scopes.csv")
+
+		autodryscopes={}
+
+		if options.autodryrun:
+			autodryscopes = loadAutodryScopes(configdir+os.sep+"dryrun.csv")
 		
 		interface_excludes=[]
 
@@ -969,14 +1048,14 @@ def main():
 
 			logger.info("started in worker daemon mode")
 			with daemon.DaemonContext():
-				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid)
+				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid,options.autodryrun,autodryscopes)
 				time.sleep(25)
 
 		else:
 
 			logger.info("started in worker fg mode")
 			while True:
-				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid)
+				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid,options.autodryrun,autodryscopes)
 				time.sleep(25)
 
 			

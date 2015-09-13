@@ -1,0 +1,3 @@
+location-id;switch-mgmt-subnet;dryrunornot
+2;10.99.16.0/24;DRY
+2;10.99.3.0/25;NO-DRYRUN

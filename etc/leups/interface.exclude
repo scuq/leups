@@ -1,0 +1,7 @@
+# regex to exclude Portchannel "Po" interfaces
+Po[0-9]{1,2}
+Port-channel[0-9]{1,2}
+Gi[0-9]\/[0-9]\/{49}
+Gi[0-9]\/[0-9]\/{50}
+Gi[0-9]\/[0-9]\/{51}
+Gi[0-9]\/[0-9]\/{51}
