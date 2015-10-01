@@ -1,3 +1,3 @@
-location-id;switch-mgmt-subnet;username;password;voicevlanid
-2;10.99.16.0/24;admin;password;300
-2;10.99.3.0/25;admin;password;300
+location-id;sublocation-id;location-label;sublocation-label;switch-mgmt-subnet;username;password;voicevlanid
+2;16;NY;NYC;10.99.16.0/24;admin;password;300
+2;5;NY;Albany;10.99.5.0/24;admin;password;300
