@@ -26,13 +26,14 @@
 
 
 scriptname="leups"
-version="0.5"
+version="0.8"
 codename="Alaska"
 
 import sys
 import os
 import re
 import shutil
+import sqlite3
 import datetime
 import urllib
 import time
@@ -56,6 +57,189 @@ import netaddr
 import daemon
 from subprocess import Popen, PIPE, STDOUT
 from optparse import OptionParser
+
+def execute(command):
+
+        p = Popen(command, shell=True, stdin=PIPE, stdout=PIPE, stderr=PIPE, close_fds=True)
+        stdOut=re.sub('\\n+','\\n',str(p.stdout.read().decode("utf-8"))).split("\n")
+        stdErr=str(p.stderr.read()).split("\n")
+
+
+
+        return stdOut, stdErr
+
+def createNewReportingDb(workingdir):
+
+
+	try:
+
+		_ts = datetime.datetime.utcnow()
+	
+		logger.info("creating new reportingdb file "+workingdir+os.sep+"reporting_"+_ts.strftime("%Y%m")+".db")
+
+		dbfile = workingdir+os.sep+"reporting_"+_ts.strftime("%Y%m")+".db"
+
+		conn = sqlite3.connect(dbfile)
+
+		_query = "CREATE TABLE IF NOT EXISTS STATS (id integer, switchip VARCHAR UNIQUE NOT NULL, traprcvcnt integer DEFAULT 0, actionrequiredcnt integer DEFAULT 0, enforcedcnt integer DEFAULT 0 );"
+
+		logger.debug(_query)
+
+		conn.execute(_query)
+
+		conn.commit()
+	
+		_query = "CREATE TABLE IF NOT EXISTS ACTIONS (id integer, switchip VARCHAR NOT NULL, interface VARCHAR NOT NULL, configold VARCHAR, confignew VARCHAR, enforcing integer, reportedvlan VARCHAR, csvvlan VARCHAR, hostnamehint VARCHAR, Timestamp DATETIME DEFAULT CURRENT_TIMESTAMP);"
+
+		logger.debug(_query)
+	
+       		conn.execute(_query)
+
+       		conn.commit()
+
+
+                _query = "CREATE TABLE IF NOT EXISTS LOCATIONMAP (id integer, switchip VARCHAR UNIQUE NOT NULL, locationid integer DEFAULT 1, sublocationid integer DEFAULT 1, locationlabel VARCHAR, sublocationlabel VARCHAR );"
+
+                logger.debug(_query)
+
+                conn.execute(_query)
+
+                _query = "CREATE TABLE IF NOT EXISTS LOCATIONS (id integer, locationid integer DEFAULT 1, sublocationid integer DEFAULT 1, locationlabel VARCHAR, sublocationlabel VARCHAR );"
+
+                logger.debug(_query)
+
+                conn.execute(_query)
+
+		_query = "CREATE UNIQUE INDEX idx_twocols ON LOCATIONS(locationid, sublocationid)"
+
+                conn.execute(_query)
+
+       		conn.commit()
+
+       		conn.close()
+
+		return True
+
+	except:
+		logger.info("database create failed "+workingdir+os.sep+"reporting_"+_ts.strftime("%Y%m")+".db")
+		return False
+
+
+
+def reportAction(workingdir,switchip,interface,configold,confignew,enforcing,reportedvlan,csvvlan,hostnamehint,scope):
+
+
+        try:
+                _ts = datetime.datetime.utcnow()
+                dbfile = workingdir+os.sep+"reporting_"+_ts.strftime("%Y%m")+".db"
+
+		if not os.path.exists(workingdir+os.sep+"reporting_"+_ts.strftime("%Y%m")+".db"):
+			createNewReportingDb(workingdir)
+
+		conn = sqlite3.connect(dbfile)
+
+		_query = "INSERT INTO ACTIONS (switchip, interface, configold, confignew, enforcing, reportedvlan, csvvlan, hostnamehint) VALUES ('"+switchip+"', '"+interface+"', '"+configold+"', '"+confignew+"', "+str(int(enforcing))+", '"+str(reportedvlan)+"', '"+str(csvvlan)+"', '"+hostnamehint+"')"
+
+		logger.debug(_query)
+		conn.execute(_query)
+
+		conn.commit()
+		conn.close()
+		return True
+
+	
+	except:
+
+		createNewReportingDb(workingdir)
+		logger.error("error while inserting report action in db: "+str(sys.exc_info()[0])+" "+str(sys.exc_info()[1]))
+		return False
+
+
+def setLocationHint(workingdir, switchip, scope):
+
+
+	try:
+
+                _ts = datetime.datetime.utcnow()
+		dbfile = workingdir+os.sep+"reporting_"+_ts.strftime("%Y%m")+".db"
+		conn = sqlite3.connect(dbfile)
+
+
+
+		_query = "INSERT OR REPLACE INTO LOCATIONMAP (switchip, locationid, sublocationid, locationlabel, sublocationlabel) VALUES ('"+switchip+"', "+str(int(scope["locationid"]))+", "+str(int(scope["sublocationid"]))+", '"+str(scope["locationlabel"])+"', '"+str(scope["sublocationlabel"])+"')"
+
+		logger.debug(_query)
+
+		conn.execute(_query)
+
+		conn.commit()
+
+		_query = "INSERT OR REPLACE INTO LOCATIONS (locationid, sublocationid, locationlabel, sublocationlabel) VALUES ("+str(int(scope["locationid"]))+", "+str(int(scope["sublocationid"]))+", '"+str(scope["locationlabel"])+"', '"+str(scope["sublocationlabel"])+"')"
+
+		logger.debug(_query)
+
+		conn.execute(_query)
+
+		conn.commit()
+	
+		conn.close()
+
+		return True
+
+			
+	except:
+
+		createNewReportingDb(workingdir)
+		logger.error("error while updating locations in db: "+str(sys.exc_info()[0])+" "+str(sys.exc_info()[1]))
+		return False
+		
+
+def incCounter(workingdir, switchip, countername):
+
+
+	try:
+		_ts = datetime.datetime.utcnow()
+		dbfile = workingdir+os.sep+"reporting_"+_ts.strftime("%Y%m")+".db"
+
+		conn = sqlite3.connect(dbfile)
+
+		cur = conn.cursor()
+
+		_query = "SELECT "+countername+" FROM STATS WHERE switchip='" + switchip + "' LIMIT 1;"
+
+		logger.debug(_query)
+
+		cur.execute(_query)
+
+		try:
+			
+			_value = int(cur.fetchone()[0])
+			_value = _value + 1
+			_query = "UPDATE STATS SET "+countername+"="+str(_value)+" WHERE switchip='"+switchip+"';" 
+		except:
+			logger.debug("error while increasing counter in db: "+str(sys.exc_info()[0])+" "+str(sys.exc_info()[1]))
+			_value = 0
+			_query = "INSERT OR REPLACE INTO STATS (switchip, "+countername+") VALUES ('"+switchip+"', "+str(_value)+")" 
+
+
+		
+
+
+		logger.debug(_query)
+
+		conn.execute(_query)
+
+		conn.commit()
+
+		conn.close()
+
+		return True
+
+	except:
+
+		createNewReportingDb(workingdir)
+		logger.error("error while updating trap cnt in db: "+str(sys.exc_info()[0])+" "+str(sys.exc_info()[1]))
+		return False
 
 
 def getLatestMacToVlanCsv(cachepath,csvurl):
@@ -258,7 +442,7 @@ def writeFilesystemQ(macs,trapsource,workingdir):
 # if no --dryrun is specified, set the port config
 # hardcoded for cisco ios
 #
-def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scopes,interface_excludes):
+def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scopes,interface_excludes,workingdir,reporter,reportedvlan,csvvlan):
 
 
 	# amac2vlan is a dict which is mapping a mac-address to a vlanid
@@ -292,7 +476,6 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 	else:
 		logger.info("DRYRUN!! executeAction called, "+str(len(amac2vlan.keys()))+" pending actions for switch "+switch)
 	
-
 
 	try:
 		showmactablestr=""
@@ -335,6 +518,7 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 		showmactablestr = s.before
 
 
+
 		# iterate the output, filtering mac-table by DYNAMIC entries
 		#
 		exclude_cnt = 0	
@@ -362,6 +546,8 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 
 		logger.info("number of excluded lines from the show mac address-table command: "+str(exclude_cnt))
 
+		
+
 		# now we should have a filled mactable dict with mac -> switchport
 		# the port is a usable interface name for applying settings later on
 
@@ -379,6 +565,7 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 			
 			# check if we have a profile for this mac address in the csv file
 			if mac2profile.keys().count(mac) > 0:
+				
 				
 				
 
@@ -429,19 +616,72 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 					continue
 
 				replacedprofile += line
+			# fetch current port config
+			# and try to figure out if the current port is a trunk port
+			# with native vlanid or a voice port	
+			logger.info("do show run on interface: "+_interface)
+			oldrunconfig = ""
+			cleanoldrunconfig = ""
+			trunkvoicedetected = False
+			if not dryrun:
+				s.sendline("do show run interface "+_interface+"\n")
+
+				time.sleep(0.1)
+
+				# wait for the closing line by the string "(config)" 
+				s.expect("end\r\n\r\n",timeout=10)
+
+				# fill the oldrunconfig string with the output buffer from the ssh session
+				oldrunconfig = s.before
+
 				
+				try:
+					_startfound=False
+					_nativetrunkorvoicefound=False
+					for ocline in oldrunconfig.split("\r\n"):
+						if ocline.count("Current configuration") > 0:	
+							_startfound=True
+							continue
+						if ocline.count("switchport trunk native vlan"):
+							trunkvoicedetected=True
+						if ocline.count("switchport voice vlan"):
+							trunkvoicedetected=True
+						
+						if _startfound == True:
+							cleanoldrunconfig += ocline + "\n"
+				except:
+					pass
+
+			if trunkvoicedetected==True:
+				logger.info("the current config reveals a trunk/native or voice port, leups will not touch that.")
+
+			else:
 
 					
-			for line in replacedprofile.split("\n"):
+				for line in replacedprofile.split("\n"):
 
-				logger.info(line)
-				if not dryrun:
-					s.sendline(line+"\n")
-					s.prompt()
+					logger.info(line)
+					if not dryrun:
+						s.sendline(line+"\n")
+						s.prompt()
 
 			if not dryrun:
 				s.sendline("  exit\n")
 				s.prompt()
+
+			if reporter:
+				incCounter(workingdir, switch, "actionrequiredcnt")
+
+				_enforcing = False
+				if dryrun:
+					_enforcing = False
+				else:
+					if trunkvoicedetected==False:
+						_enforcing = True
+						incCounter(workingdir, switch, "enforcedcnt")
+
+				
+				reportAction(workingdir,switch,_interface,cleanoldrunconfig,replacedprofile,_enforcing,reportedvlan,amac2vlan[mac],mac2hostname[mac],scope)
 
 		if not dryrun:
                         s.sendline('end\n')
@@ -455,6 +695,42 @@ def executeAction(amac2vlan,mac2profile,mac2hostname,switch,dryrun,profiles,scop
 	except:
 		logger.error("error while executing ssh action on switch "+switch+" "+str(sys.exc_info()[0])+" "+str(sys.exc_info()[1]))
 
+
+def loadOverwriteProfiles(overwriteprofilefile):
+
+	overwriteprofiles = {}
+
+        # col0 = vendor desc
+        # col1 = mac vendor bytes
+        # col2 = profile (overwrite profile)
+
+        overwritecsvlines=""
+
+        try:
+                f = open(overwriteprofilefile, 'r')
+                # ignore first line - header
+                f.readline()
+                overwritecsvlines = f.readlines()
+                f.close()
+        except:
+                logger.error("error while reading "+overwriteprofilefile+" file.")
+                sys.exit(1)
+
+
+        for line in overwritecsvlines:
+                overwriteprofile={}
+                if line.split(";") >= 2:
+                        overwriteprofile["macvendordesc"]  = line.split(";")[0]
+                        overwriteprofile["macvendorid"]  = line.split(";")[1]
+                        overwriteprofile["overwriteprofile"]  = line.split(";")[2].strip()
+
+                        overwriteprofiles[overwriteprofile["macvendorid"]] = overwriteprofile
+
+        logger.info("number of overwriteprofiles loaded: "+str(len(overwriteprofiles.keys())))
+
+        return overwriteprofiles
+
+	
 
 def loadProfiles(profiledir):
 
@@ -523,7 +799,7 @@ def loadAutodryScopes(scopecsvfile):
                         scope["locationid"]  = line.split(";")[0]
 			scope["ipv4subnet"]  = line.split(";")[1] 
 			_dryrunornot = line.split(";")[2]
-			if _dryrunornot == "NO-DRYRUN":
+			if _dryrunornot.count("NO-DRYRUN") > 0:
 	                        scope["dryrun"]  = False
 			else:
 				scope["dryrun"]  = True
@@ -538,10 +814,14 @@ def loadScopes(scopecsvfile):
 
 	scopes={}
 
-	# col0 = switch-mgmt-subnet
-	# col1 = ssh-username
-	# col2 = ssh-password
-	# col3 = voicevlanid
+	# col0 = location-id
+	# col1 = sublocation-id
+	# col2 = location-label
+	# col3 = sublocation-label
+	# col4 = switch-mgmt-subnet
+	# col5 = ssh-username
+	# col6 = ssh-password
+	# col7 = voicevlanid
 
 	scopecsvlines=""
 	
@@ -557,12 +837,15 @@ def loadScopes(scopecsvfile):
 
 	for line in scopecsvlines:
 		scope={}
-		if line.split(";") >= 5:
+		if line.split(";") >= 8:
 			scope["locationid"]  = line.split(";")[0] 
-			scope["ipv4subnet"]  = line.split(";")[1] 
-			scope["sshusername"]  = line.split(";")[2] 
-			scope["sshpassword"]  = line.split(";")[3] 
-			scope["voicevlanid"]  = line.split(";")[4] 
+			scope["sublocationid"]  = line.split(";")[1] 
+			scope["locationlabel"]  = line.split(";")[2] 
+			scope["sublocationlabel"]  = line.split(";")[3] 
+			scope["ipv4subnet"]  = line.split(";")[4] 
+			scope["sshusername"]  = line.split(";")[5] 
+			scope["sshpassword"]  = line.split(";")[6] 
+			scope["voicevlanid"]  = line.split(";")[7] 
 
 			scopes[scope["ipv4subnet"]] = scope
 
@@ -575,7 +858,7 @@ def loadScopes(scopecsvfile):
 # created by snmp traps with snmptt
 # and leups in --store mode
 #
-def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawareness,ignorelocationid,autodryrun, autodryscopes):
+def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawareness,ignorelocationid,autodryrun, autodryscopes, reporter, overwriteprofiles):
 
 
 	# init empty dict for mac -> vlan from csv
@@ -610,6 +893,11 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 						mac2hostname="unknown-host"
 					try:
 						mac2profile[str(row[0]).upper()] = row[8]
+						if len(str(row[0]).upper()) == 12:
+							_maccvendor=str(row[0]).upper()[0:6]
+							if overwriteprofiles.keys().count(_maccvendor) > 0:
+								logger.info("overwriting profile based on mac vendor range mac "+str(row[0]).upper()+" is within the range of "+overwriteprofiles[_maccvendor]["macvendordesc"]+" profile "+overwriteprofiles[_maccvendor]["overwriteprofile"]+" will be used.")
+								mac2profile[str(row[0]).upper()] = overwriteprofiles[_maccvendor]["overwriteprofile"]
 					except: 
 						mac2profile="<NONE>"
 					try:
@@ -740,6 +1028,8 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
                                                                                                         autodryscopefound=True
                                                                                                         break
 
+											print autodryscope
+
 											if autodryrun:
 												logger.info("autodryrun active")
 												dryrun = False
@@ -758,6 +1048,8 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 												if not int(ignorelocationid) == mac2locationid[mac]:
 													amac2vlan[mac]=mac2vlan[mac]
 													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for locationid: "+str(scopes["locationid"]))
+
+								
 													specific_location_found = True
 												else:
 													logger.info("action needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+" for locationid: "+str(scopes["locationid"])+" but locationid is set to ignore")
@@ -778,7 +1070,12 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 
 
 											if location_found == False:
-													logger.info("action maybe needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+", but no matching locationid found, locationid of csv: "+str(mac2locationid[mac])+" locationid of switch: "+str(scope["locationid"]))
+
+													try:
+														logger.info("action maybe needed, for mac "+mac+" switch "+switchipdir+" reported vlan "+str(qmac2vlan[mac])+" csv contains vlan "+str(mac2vlan[mac])+", but no matching locationid found, locationid of csv: "+str(mac2locationid[mac])+" locationid of switch: "+str(scope["locationid"]))
+													except:
+														logger.info("action maybe needed, for mac "+mac+" switch "+switchipdir+" exception while generating info log for location_found.")
+														pass
 											
 
 									else:
@@ -805,7 +1102,10 @@ def worker(workingdir,dryrun,profiles,scopes,interface_excludes,locationawarenes
 
 
 						if len(amac2vlan.keys()) > 0:
-							executeAction(amac2vlan,mac2profile,mac2hostname,switchipdir,dryrun,profiles,scopes,interface_excludes)
+							try:
+								executeAction(amac2vlan,mac2profile,mac2hostname,switchipdir,dryrun,profiles,scopes,interface_excludes,workingdir,reporter,qmac2vlan[mac],mac2vlan[mac])
+							except:
+								logger.error("error while executing action: "+str(sys.exc_info()[0])+" "+str(sys.exc_info()[1]))
 						else:
 							logger.info("no action needed on switch: "+switchipdir)
 
@@ -824,8 +1124,10 @@ def main():
         parser.add_option("-m", "--macchangedmsg", dest="machangedmsg", help="")
         parser.add_option("-s", "--store", action="store_true", dest="store", default=False, help="store mode, mode for use with snmptt")
         parser.add_option("-w", "--worker", action="store_true", dest="worker", default=False, help="worker mode, reads the q and execute actions")
+        parser.add_option("", "--enable-reporter", action="store_true", dest="reporter", default=False, help="enable report logging to sqlitedb")
         parser.add_option("-l", "--locationawareness", action="store_true", dest="locationawareness", default=False, help="enable location awareness")
         parser.add_option("-i", "--ignorelocation", dest="ignorelocationid", help="ignore the following locationid")
+        parser.add_option("-o", "--overwrite-profile", action="store_true", dest="loadoverwriteprofiles", default=False, help="respect overwrite-profiles.csv to overwrite a profile for a specific mac vendor id")
         parser.add_option("-r", "--dryrun", action="store_true", dest="dryrun", default=False, help="worker mode, dry run, don't configure anything")
         parser.add_option("-a", "--autodry", action="store_true", dest="autodryrun", default=False, help="worker mode, auto switch dryrun on or off by dryrun.csv only allowed with --dryrun and --locationawareness")
         parser.add_option("-u", "--updater", action="store_true", dest="updater", default=False, help="updater mode, get new cmdb cache database")
@@ -846,9 +1148,16 @@ def main():
 	profiledir = configdir+os.sep+"profiles"
 	scopefile = "/dev/null"
 
-
 	if options.debug:
 		logger.setLevel(logging.DEBUG)
+
+	if options.reporter:
+
+		logger.info("reporter enabled")
+
+			
+
+
 
 	if options.autodryrun:
 		if not options.dryrun or not options.autodryrun or not options.locationawareness:
@@ -982,6 +1291,8 @@ def main():
 
 	                scopes = loadScopes(configdir+os.sep+"scopes.csv")
 
+			scope = {}
+
 		        # find the scope read from the scopes.csv for the current switchip
         		for switchsubnet in scopes.keys():
                 		if is_in_v4subnet(trapsource,switchsubnet):
@@ -994,10 +1305,17 @@ def main():
 			else:
 				logger.info("switch "+trapsource+" found in scope.csv")
 
+				if options.reporter:
+					setLocationHint(workingdir, trapsource, scope)
+
 				_macs = parseNotification(machangedmsgs,trapsource)
 
 		else: 
 			logger.info("mac change notification received, but no useable data found.") 
+
+
+		if options.reporter:
+			incCounter(workingdir, trapsource, "traprcvcnt")
 
 
 		writeFilesystemQ(_macs,trapsource,workingdir)
@@ -1009,6 +1327,11 @@ def main():
 	if options.worker:
 
 
+		overwriteprofiles={}
+
+		if options.loadoverwriteprofiles:
+
+			overwriteprofiles = loadOverwriteProfiles(configdir+os.sep+"overwrite-profiles.csv")
 
 
 		if not os.path.exists(configdir):
@@ -1048,14 +1371,14 @@ def main():
 
 			logger.info("started in worker daemon mode")
 			with daemon.DaemonContext():
-				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid,options.autodryrun,autodryscopes)
+				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid,options.autodryrun,autodryscopes,options.reporter,overwriteprofiles)
 				time.sleep(25)
 
 		else:
 
 			logger.info("started in worker fg mode")
 			while True:
-				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid,options.autodryrun,autodryscopes)
+				worker(workingdir,options.dryrun,profiles,scopes,interface_excludes,options.locationawareness,options.ignorelocationid,options.autodryrun,autodryscopes,options.reporter,overwriteprofiles)
 				time.sleep(25)
 
 			
